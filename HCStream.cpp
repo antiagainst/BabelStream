@@ -52,11 +52,14 @@ void listDevices(void)
 
 
 template <class T>
-HCStream<T>::HCStream(const unsigned int ARRAY_SIZE, const int device_index):
+HCStream<T>::HCStream(const unsigned int ARRAY_SIZE, const bool event_timing,
+  const int device_index):
   array_size(ARRAY_SIZE),
   d_a(ARRAY_SIZE),
   d_b(ARRAY_SIZE),
-  d_c(ARRAY_SIZE)
+  d_c(ARRAY_SIZE),
+  evt_timing(event_timing),
+  lane_cnt(ARRAY_SIZE / elts_per_lane)
 {
 
   // The array size must be divisible by VIRTUALTILESIZE for kernel launches
@@ -123,73 +126,177 @@ void HCStream<T>::read_arrays(std::vector<T>& a, std::vector<T>& b, std::vector<
   hc::copy(d_c,c.begin());
 }
 
-
 template <class T>
-void HCStream<T>::copy()
+float HCStream<T>::read()
 {
+  float evt_time = 0.;
 
   hc::array_view<T,1> view_a = this->d_a;
   hc::array_view<T,1> view_c = this->d_c;
 
   try{
-    hc::completion_future future_kernel = hc::parallel_for_each(hc::extent<1>(array_size)
-                                , [=](hc::index<1> index) [[hc]] {
-                                  view_c[index] = view_a[index];
+    hc::extent<1>total_threads(lane_cnt);
+    hc::tiled_extent<1>workgroups(total_threads, 1024);
+    hc::completion_future future_kernel = hc::parallel_for_each(workgroups
+                                , [=](hc::index<1> in_index) [[hc]] {
+                                  const hc::index<1> index = in_index * elts_per_lane;
+                                  T temp = 0.;
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    temp += view_a[index + i];
+                                  }
+                                  if (temp == 126789.)
+                                    view_c[index] = temp;
+                                });
+    future_kernel.wait();
+    if (evt_timing)
+      evt_time = (future_kernel.get_end_tick() - future_kernel.get_begin_tick()) / 1000000.;
+  }
+  catch(std::exception& e){
+    std::cerr << __FILE__ << ":" << __LINE__ << "\t HCStream<T>::read " << e.what() << std::endl;
+    throw;
+  }
+
+  return evt_time;
+}
+
+template <class T>
+float HCStream<T>::write()
+{
+  float evt_time = 0.;
+
+  hc::array_view<T,1> view_c = this->d_c;
+
+  try{
+    hc::extent<1>total_threads(lane_cnt);
+    hc::tiled_extent<1>workgroups(total_threads, 1024);
+    hc::completion_future future_kernel = hc::parallel_for_each(workgroups
+                                , [=](hc::index<1> in_index) [[hc]] {
+                                  const hc::index<1> index = in_index * elts_per_lane;
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    view_c[index+i] = 0.;
+                                  }
+                                });
+    future_kernel.wait();
+    if (evt_timing)
+      evt_time = (future_kernel.get_end_tick() - future_kernel.get_begin_tick()) / 1000000.;
+  }
+
+  catch(std::exception& e){
+    std::cerr << __FILE__ << ":" << __LINE__ << "\t HCStream<T>::write " << e.what() << std::endl;
+    throw;
+  }
+
+  return evt_time;
+}
+
+template <class T>
+float HCStream<T>::copy()
+{
+  float evt_time = 0.;
+
+  hc::array_view<T,1> view_a = this->d_a;
+  hc::array_view<T,1> view_c = this->d_c;
+
+  try{
+    hc::extent<1>total_threads(lane_cnt);
+    hc::tiled_extent<1>workgroups(total_threads, 1024);
+    hc::completion_future future_kernel = hc::parallel_for_each(workgroups
+                                , [=](hc::index<1> in_index) [[hc]] {
+                                  const hc::index<1> index = in_index * elts_per_lane;
+                                  T temp[elts_per_lane];
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    temp[i] = view_a[index+i];
+                                  }
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    view_c[index+i] = temp[i];
+                                  }
 								});
     future_kernel.wait();
+    if (evt_timing)
+      evt_time = (future_kernel.get_end_tick() - future_kernel.get_begin_tick()) / 1000000.;
   }
   catch(std::exception& e){
     std::cerr << __FILE__ << ":" << __LINE__ << "\t HCStream<T>::copy " << e.what() << std::endl;
     throw;
   }
+
+  return evt_time;
 }
 
 template <class T>
-void HCStream<T>::mul()
+float HCStream<T>::mul()
 {
+  float evt_time = 0.;
 
   const T scalar = startScalar;
   hc::array_view<T,1> view_b = this->d_b;
   hc::array_view<T,1> view_c = this->d_c;
 
   try{
-    hc::completion_future future_kernel = hc::parallel_for_each(hc::extent<1>(array_size)
-                                , [=](hc::index<1> i) [[hc]] {
-                                  view_b[i] = scalar*view_c[i];
+    hc::extent<1>total_threads(lane_cnt);
+    hc::tiled_extent<1>workgroups(total_threads, 1024);
+    hc::completion_future future_kernel = hc::parallel_for_each(workgroups
+                                , [=](hc::index<1> in_index) [[hc]] {
+                                  const hc::index<1> index = in_index * elts_per_lane;
+                                  T temp[elts_per_lane];
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    temp[i] = scalar*view_c[index+i];
+                                  }
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    view_b[index+i] = temp[i];
+                                  }
 								});
     future_kernel.wait();
+    if (evt_timing)
+      evt_time = (future_kernel.get_end_tick() - future_kernel.get_begin_tick()) / 1000000.;
   }
   catch(std::exception& e){
     std::cerr << __FILE__ << ":" << __LINE__ << "\t HCStream<T>::mul " << e.what() << std::endl;
     throw;
   }
+
+  return evt_time;
 }
 
 template <class T>
-void HCStream<T>::add()
+float HCStream<T>::add()
 {
-
+  float evt_time = 0.;
 
   hc::array_view<T,1> view_a(this->d_a);
   hc::array_view<T,1> view_b(this->d_b);
   hc::array_view<T,1> view_c(this->d_c);
 
   try{
-    hc::completion_future future_kernel = hc::parallel_for_each(hc::extent<1>(array_size)
-                                , [=](hc::index<1> i) [[hc]] {
-                                  view_c[i] = view_a[i]+view_b[i];
+    hc::extent<1>total_threads(lane_cnt);
+    hc::tiled_extent<1>workgroups(total_threads, 1024);
+    hc::completion_future future_kernel = hc::parallel_for_each(workgroups
+                                , [=](hc::index<1> in_index) [[hc]] {
+                                  const hc::index<1> index = in_index * elts_per_lane;
+                                  T temp[elts_per_lane];
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    temp[i] = view_a[index+i]+view_b[index+i];
+                                  }
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    view_c[index+i] = temp[i];
+                                  }
 								});
     future_kernel.wait();
+    if (evt_timing)
+      evt_time = (future_kernel.get_end_tick() - future_kernel.get_begin_tick()) / 1000000.;
   }
   catch(std::exception& e){
     std::cerr << __FILE__ << ":" << __LINE__ << "\t HCStream<T>::add " << e.what() << std::endl;
     throw;
   }
+
+  return evt_time;
 }
 
 template <class T>
-void HCStream<T>::triad()
+float HCStream<T>::triad()
 {
+  float evt_time = 0.;
 
   const T scalar = startScalar;
   hc::array_view<T,1> view_a(this->d_a);
@@ -197,16 +304,29 @@ void HCStream<T>::triad()
   hc::array_view<T,1> view_c(this->d_c);
 
   try{
-    hc::completion_future future_kernel = hc::parallel_for_each(hc::extent<1>(array_size)
-                                , [=](hc::index<1> i) [[hc]] {
-                                  view_a[i] = view_b[i] + scalar*view_c[i];
+    hc::extent<1>total_threads(lane_cnt);
+    hc::tiled_extent<1>workgroups(total_threads, 1024);
+    hc::completion_future future_kernel = hc::parallel_for_each(workgroups
+                                , [=](hc::index<1> in_index) [[hc]] {
+                                  const hc::index<1> index = in_index * elts_per_lane;
+                                  T temp[elts_per_lane];
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    temp[i] = view_b[index+i] + scalar*view_c[index+i];
+                                  }
+                                  for (auto i = 0u; i != elts_per_lane; ++i) {
+                                    view_a[index+i] = temp[i];
+                                  }
 								});
     future_kernel.wait();
+    if (evt_timing)
+      evt_time = (future_kernel.get_end_tick() - future_kernel.get_begin_tick()) / 1000000.;
   }
   catch(std::exception& e){
     std::cerr << __FILE__ << ":" << __LINE__ << "\t HCStream<T>::triad " << e.what() << std::endl;
     throw;
   }
+
+  return evt_time;
 }
 
 template <class T>

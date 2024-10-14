@@ -28,20 +28,62 @@ std::string kernels{R"CLC(
     c[i] = initC;
   }
 
+  kernel void read(
+    global const TYPE * restrict a,
+    global TYPE * restrict c)
+  {
+    const size_t dx = get_num_groups(0) * get_local_size(0) * ELTS_PER_LANE;
+    const size_t gidx = get_global_id(0) * ELTS_PER_LANE;
+
+    TYPE local_temp = 0.;
+    for (int i = 0; i != CHUNKS_PER_WG; ++i) {
+      for (int j = 0; j != ELTS_PER_LANE; ++j) {
+        local_temp += a[gidx + i * dx + j];
+      }
+    }
+    if (local_temp == 126789.)
+      c[gidx] = local_temp;
+  }
+
+  kernel void write(
+    global TYPE * restrict c)
+  {
+    const size_t dx = get_num_groups(0) * get_local_size(0) * ELTS_PER_LANE;
+    const size_t gidx = get_global_id(0) * ELTS_PER_LANE;
+
+    for (int i = 0; i != CHUNKS_PER_WG; ++i) {
+      for (int j = 0; j != ELTS_PER_LANE; ++j) {
+        c[gidx + i * dx + j] = STARTC;
+      }
+    }
+  }
+
   kernel void copy(
     global const TYPE * restrict a,
     global TYPE * restrict c)
   {
-    const size_t i = get_global_id(0);
-    c[i] = a[i];
+    const size_t dx = get_num_groups(0) * get_local_size(0) * ELTS_PER_LANE;
+    const size_t gidx = get_global_id(0) * ELTS_PER_LANE;
+
+    for (int i = 0; i != CHUNKS_PER_WG; ++i) {
+      for (int j = 0; j != ELTS_PER_LANE; ++j) {
+        c[gidx + i * dx + j] = a[gidx + i * dx + j];
+      }
+    }
   }
 
   kernel void mul(
     global TYPE * restrict b,
     global const TYPE * restrict c)
   {
-    const size_t i = get_global_id(0);
-    b[i] = scalar * c[i];
+    const size_t dx = get_num_groups(0) * get_local_size(0) * ELTS_PER_LANE;
+    const size_t gidx = get_global_id(0) * ELTS_PER_LANE;
+
+    for (int i = 0; i != CHUNKS_PER_WG; ++i) {
+      for (int j = 0; j != ELTS_PER_LANE; ++j) {
+        b[gidx + i * dx + j] = scalar * c[gidx + i * dx + j];
+      }
+    }
   }
 
   kernel void add(
@@ -49,8 +91,14 @@ std::string kernels{R"CLC(
     global const TYPE * restrict b,
     global TYPE * restrict c)
   {
-    const size_t i = get_global_id(0);
-    c[i] = a[i] + b[i];
+    const size_t dx = get_num_groups(0) * get_local_size(0) * ELTS_PER_LANE;
+    const size_t gidx = get_global_id(0) * ELTS_PER_LANE;
+
+    for (int i = 0; i != CHUNKS_PER_WG; ++i) {
+      for (int j = 0; j != ELTS_PER_LANE; ++j) {
+        c[gidx + i * dx + j] = a[gidx + i * dx + j] + b[gidx + i * dx + j];
+      }
+    }
   }
 
   kernel void triad(
@@ -58,8 +106,14 @@ std::string kernels{R"CLC(
     global const TYPE * restrict b,
     global const TYPE * restrict c)
   {
-    const size_t i = get_global_id(0);
-    a[i] = b[i] + scalar * c[i];
+    const size_t dx = get_num_groups(0) * get_local_size(0) * ELTS_PER_LANE;
+    const size_t gidx = get_global_id(0) * ELTS_PER_LANE;
+
+    for (int i = 0; i != CHUNKS_PER_WG; ++i) {
+      for (int j = 0; j != ELTS_PER_LANE; ++j) {
+        a[gidx + i * dx + j] = b[gidx + i * dx + j] + scalar * c[gidx + i * dx + j];
+      }
+    }
   }
 
   kernel void stream_dot(
@@ -67,32 +121,59 @@ std::string kernels{R"CLC(
     global const TYPE * restrict b,
     global TYPE * restrict sum,
     local TYPE * restrict wg_sum,
-    int array_size)
+    uint array_size)
   {
-    size_t i = get_global_id(0);
+    const size_t dx = get_num_groups(0) * get_local_size(0) * ELTS_PER_LANE;
+    const size_t gidx = get_global_id(0) * ELTS_PER_LANE;
     const size_t local_i = get_local_id(0);
-    wg_sum[local_i] = 0.0;
-    for (; i < array_size; i += get_global_size(0))
-      wg_sum[local_i] += a[i] * b[i];
+
+    TYPE temp = 0.;
+    for (int i = 0; i != CHUNKS_PER_WG; ++i) {
+      for (int j = 0; j != ELTS_PER_LANE; ++j) {
+        temp += a[gidx + i * dx + j] * b[gidx + i * dx + j];
+      }
+    }
+
+    wg_sum[local_i] = temp;
 
     for (int offset = get_local_size(0) / 2; offset > 0; offset /= 2)
     {
       barrier(CLK_LOCAL_MEM_FENCE);
-      if (local_i < offset)
-      {
-        wg_sum[local_i] += wg_sum[local_i+offset];
-      }
+      if (local_i >= offset) continue;
+
+      wg_sum[local_i] += wg_sum[local_i + offset];
     }
 
-    if (local_i == 0)
-      sum[get_group_id(0)] = wg_sum[local_i];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if (local_i)
+      return;
+
+    sum[get_group_id(0)] = wg_sum[0];
   }
 
 )CLC"};
 
+static unsigned int getDeviceVendor(const int device)
+{
+  if (!cached)
+    getDeviceList();
+
+  unsigned int vendor_id;
+  cl_device_info info = CL_DEVICE_VENDOR_ID;
+
+  if (device < devices.size())
+    devices[device].getInfo(info, &vendor_id);
+  else
+    throw std::runtime_error("Error asking for name for non-existant device");
+
+  return vendor_id;
+}
 
 template <class T>
-OCLStream<T>::OCLStream(const unsigned int ARRAY_SIZE, const int device_index)
+OCLStream<T>::OCLStream(const unsigned int ARRAY_SIZE, const bool event_timing,
+  const int device_index)
+  : array_size(ARRAY_SIZE), evt_timing(event_timing)
 {
   if (!cached)
     getDeviceList();
@@ -102,17 +183,26 @@ OCLStream<T>::OCLStream(const unsigned int ARRAY_SIZE, const int device_index)
     throw std::runtime_error("Invalid device index");
   device = devices[device_index];
 
-  // Determine sensible dot kernel NDRange configuration
-  if (device.getInfo<CL_DEVICE_TYPE>() & CL_DEVICE_TYPE_CPU)
+  unsigned int size_of_good_load = sizeof(unsigned int);
+  if (getDeviceVendor(device_index) == 0x1002) // AMD
   {
-    dot_num_groups = device.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>();
-    dot_wgsize     = device.getInfo<CL_DEVICE_NATIVE_VECTOR_WIDTH_DOUBLE>() * 2;
+      size_of_good_load *= 4;
+      chunks_per_wg = 1;
   }
   else
   {
-    dot_num_groups = device.getInfo<CL_DEVICE_MAX_COMPUTE_UNITS>() * 4;
-    dot_wgsize     = device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>();
+      chunks_per_wg = 8;
   }
+  elts_per_lane = size_of_good_load / sizeof(T);
+  if (elts_per_lane == 0)
+    elts_per_lane++;
+
+  // Determine sensible dot kernel NDRange configuration
+  if (device.getInfo<CL_DEVICE_TYPE>() & CL_DEVICE_TYPE_CPU)
+    dot_wgsize     = device.getInfo<CL_DEVICE_NATIVE_VECTOR_WIDTH_DOUBLE>() * 2;
+  else
+    dot_wgsize     = device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>();
+  dot_num_groups = array_size/(elts_per_lane*chunks_per_wg*dot_wgsize);
 
   // Print out device information
   std::cout << "Using OpenCL device " << getDeviceName(device_index) << std::endl;
@@ -120,12 +210,18 @@ OCLStream<T>::OCLStream(const unsigned int ARRAY_SIZE, const int device_index)
   std::cout << "Reduction kernel config: " << dot_num_groups << " groups of size " << dot_wgsize << std::endl;
 
   context = cl::Context(device);
-  queue = cl::CommandQueue(context);
+  if (evt_timing)
+    queue = cl::CommandQueue(context, CL_QUEUE_PROFILING_ENABLE);
+  else
+    queue = cl::CommandQueue(context);
 
   // Create program
   cl::Program program(context, kernels);
   std::ostringstream args;
   args << "-DstartScalar=" << startScalar << " ";
+  args << "-DELTS_PER_LANE=" << elts_per_lane << " ";
+  args << "-DCHUNKS_PER_WG=" << chunks_per_wg << " ";
+  args << "-DSTARTC=" << startC << " ";
   if (sizeof(T) == sizeof(double))
   {
     args << "-DTYPE=double";
@@ -153,13 +249,13 @@ OCLStream<T>::OCLStream(const unsigned int ARRAY_SIZE, const int device_index)
 
   // Create kernels
   init_kernel = new cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer, T, T, T>(program, "init");
+  read_kernel = new cl::KernelFunctor<cl::Buffer, cl::Buffer>(program, "read");
+  write_kernel = new cl::KernelFunctor<cl::Buffer>(program, "write");
   copy_kernel = new cl::KernelFunctor<cl::Buffer, cl::Buffer>(program, "copy");
   mul_kernel = new cl::KernelFunctor<cl::Buffer, cl::Buffer>(program, "mul");
   add_kernel = new cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer>(program, "add");
   triad_kernel = new cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer>(program, "triad");
   dot_kernel = new cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer, cl::LocalSpaceArg, cl_int>(program, "stream_dot");
-
-  array_size = ARRAY_SIZE;
 
   // Check buffers fit on the device
   cl_ulong totalmem = device.getInfo<CL_DEVICE_GLOBAL_MEM_SIZE>();
@@ -173,15 +269,15 @@ OCLStream<T>::OCLStream(const unsigned int ARRAY_SIZE, const int device_index)
   d_a = cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T) * ARRAY_SIZE);
   d_b = cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T) * ARRAY_SIZE);
   d_c = cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T) * ARRAY_SIZE);
-  d_sum = cl::Buffer(context, CL_MEM_WRITE_ONLY, sizeof(T) * dot_num_groups);
-
-  sums = std::vector<T>(dot_num_groups);
+  d_sum = cl::Buffer(context, CL_MEM_WRITE_ONLY|CL_MEM_ALLOC_HOST_PTR, sizeof(T) * dot_num_groups);
 }
 
 template <class T>
 OCLStream<T>::~OCLStream()
 {
   delete init_kernel;
+  delete read_kernel;
+  delete write_kernel;
   delete copy_kernel;
   delete mul_kernel;
   delete add_kernel;
@@ -191,57 +287,126 @@ OCLStream<T>::~OCLStream()
 }
 
 template <class T>
-void OCLStream<T>::copy()
+float OCLStream<T>::read()
 {
-  (*copy_kernel)(
-    cl::EnqueueArgs(queue, cl::NDRange(array_size)),
+  float kernel_time = 0.;
+  cl::Event evt = (*read_kernel)(
+    cl::EnqueueArgs(queue, cl::NDRange(array_size/(elts_per_lane*chunks_per_wg))),
     d_a, d_c
   );
-  queue.finish();
+  evt.wait();
+  if (evt_timing)
+  {
+    kernel_time = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
+                    evt.getProfilingInfo<CL_PROFILING_COMMAND_START>())
+                    / 1000000.;
+  }
+  return kernel_time;
 }
 
 template <class T>
-void OCLStream<T>::mul()
+float OCLStream<T>::write()
 {
-  (*mul_kernel)(
-    cl::EnqueueArgs(queue, cl::NDRange(array_size)),
+  float kernel_time = 0.;
+  cl::Event evt = (*write_kernel)(
+    cl::EnqueueArgs(queue, cl::NDRange(array_size/(elts_per_lane*chunks_per_wg))),
+    d_c
+  );
+  evt.wait();
+  if (evt_timing)
+  {
+    kernel_time = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
+                    evt.getProfilingInfo<CL_PROFILING_COMMAND_START>())
+                    / 1000000.;
+  }
+  return kernel_time;
+}
+
+template <class T>
+float OCLStream<T>::copy()
+{
+  float kernel_time = 0.;
+  cl::Event evt = (*copy_kernel)(
+    cl::EnqueueArgs(queue, cl::NDRange(array_size/(elts_per_lane*chunks_per_wg))),
+    d_a, d_c
+  );
+  evt.wait();
+  if (evt_timing)
+  {
+    kernel_time = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
+                    evt.getProfilingInfo<CL_PROFILING_COMMAND_START>())
+                    / 1000000.;
+  }
+  return kernel_time;
+}
+
+template <class T>
+float OCLStream<T>::mul()
+{
+  float kernel_time = 0.;
+  cl::Event evt = (*mul_kernel)(
+    cl::EnqueueArgs(queue, cl::NDRange(array_size/(elts_per_lane*chunks_per_wg))),
     d_b, d_c
   );
-  queue.finish();
+  evt.wait();
+  if (evt_timing)
+  {
+    kernel_time = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
+                    evt.getProfilingInfo<CL_PROFILING_COMMAND_START>())
+                    / 1000000.;
+  }
+  return kernel_time;
 }
 
 template <class T>
-void OCLStream<T>::add()
+float OCLStream<T>::add()
 {
-  (*add_kernel)(
-    cl::EnqueueArgs(queue, cl::NDRange(array_size)),
+  float kernel_time = 0.;
+  cl::Event evt = (*add_kernel)(
+    cl::EnqueueArgs(queue, cl::NDRange(array_size/(elts_per_lane*chunks_per_wg))),
     d_a, d_b, d_c
   );
-  queue.finish();
+  evt.wait();
+  if (evt_timing)
+  {
+    kernel_time = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
+                    evt.getProfilingInfo<CL_PROFILING_COMMAND_START>())
+                    / 1000000.;
+  }
+  return kernel_time;
 }
 
 template <class T>
-void OCLStream<T>::triad()
+float OCLStream<T>::triad()
 {
-  (*triad_kernel)(
-    cl::EnqueueArgs(queue, cl::NDRange(array_size)),
+  float kernel_time = 0.;
+  cl::Event evt = (*triad_kernel)(
+    cl::EnqueueArgs(queue, cl::NDRange(array_size/(elts_per_lane*chunks_per_wg))),
     d_a, d_b, d_c
   );
-  queue.finish();
+  evt.wait();
+  if (evt_timing)
+  {
+    kernel_time = (evt.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
+                    evt.getProfilingInfo<CL_PROFILING_COMMAND_START>())
+                    / 1000000.;
+  }
+  return kernel_time;
 }
 
 template <class T>
 T OCLStream<T>::dot()
 {
-  (*dot_kernel)(
-    cl::EnqueueArgs(queue, cl::NDRange(dot_num_groups*dot_wgsize), cl::NDRange(dot_wgsize)),
+  cl::Event evt = (*dot_kernel)(
+    cl::EnqueueArgs(queue, cl::NDRange(dot_num_groups * dot_wgsize), cl::NDRange(dot_wgsize)),
     d_a, d_b, d_sum, cl::Local(sizeof(T) * dot_wgsize), array_size
   );
-  cl::copy(queue, d_sum, sums.begin(), sums.end());
+  T *local_sums = static_cast<T*>(queue.enqueueMapBuffer(d_sum, CL_BLOCKING,
+                                  0, 0, dot_num_groups*sizeof(T)));
 
   T sum = 0.0;
-  for (T val : sums)
-    sum += val;
+  for (int i = 0; i < dot_num_groups; i++)
+    sum += local_sums[i];
 
   return sum;
 }
@@ -249,11 +414,11 @@ T OCLStream<T>::dot()
 template <class T>
 void OCLStream<T>::init_arrays(T initA, T initB, T initC)
 {
-  (*init_kernel)(
+  cl::Event evt = (*init_kernel)(
     cl::EnqueueArgs(queue, cl::NDRange(array_size)),
     d_a, d_b, d_c, initA, initB, initC
   );
-  queue.finish();
+  evt.wait();
 }
 
 template <class T>

@@ -3,7 +3,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- None
+### Changed
+- Use cl::sycl::id parameters instead of cl::sycl::item.
+
+### Removed
+- Pre-building of kernels in SYCL version to ensure compatibility with SYCL 1.2.1.
+  Pre-building kernels is also not required, and shows no overhead as the first iteration is not timed.
 
 ## [v3.4] - 2019-04-10
 

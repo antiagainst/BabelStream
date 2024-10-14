@@ -8,20 +8,20 @@
 
 #include <iostream>
 #include <stdexcept>
-#include "RAJA/RAJA.hxx"
+#include "RAJA/RAJA.hpp"
 
 #include "Stream.h"
 
 #define IMPLEMENTATION_STRING "RAJA"
 
 #ifdef RAJA_TARGET_CPU
-typedef RAJA::IndexSet::ExecPolicy<
+typedef RAJA::ExecPolicy<
         RAJA::seq_segit,
         RAJA::omp_parallel_for_exec> policy;
 typedef RAJA::omp_reduce reduce_policy;
 #else
 const size_t block_size = 128;
-typedef RAJA::IndexSet::ExecPolicy<
+typedef RAJA::ExecPolicy<
         RAJA::seq_segit,
         RAJA::cuda_exec<block_size>> policy;
 typedef RAJA::cuda_reduce<block_size> reduce_policy;
@@ -35,7 +35,7 @@ class RAJAStream : public Stream<T>
     unsigned int array_size;
 
     // Contains iteration space
-    RAJA::IndexSet index_set;
+    RAJA::TypedIndexSet<RAJA::RangeSegment> index_set;
 
     // Device side pointers to arrays
     T* d_a;
@@ -47,10 +47,12 @@ class RAJAStream : public Stream<T>
     RAJAStream(const unsigned int, const int);
     ~RAJAStream();
 
-    virtual void copy() override;
-    virtual void add() override;
-    virtual void mul() override;
-    virtual void triad() override;
+    virtual float read() override;
+    virtual float write() override;
+    virtual float copy() override;
+    virtual float add() override;
+    virtual float mul() override;
+    virtual float triad() override;
     virtual T dot() override;
 
     virtual void init_arrays(T initA, T initB, T initC) override;

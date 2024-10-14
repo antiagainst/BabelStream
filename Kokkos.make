@@ -1,7 +1,9 @@
 
 default: kokkos-stream
 
-include $(KOKKOS_PATH)/Makefile.kokkos
+ifndef KOKKOS_PATH
+$(error Must set KOKKOS_PATH to point to kokkos install)
+endif
 
 ifndef COMPILER
 define compiler_help
@@ -16,6 +18,8 @@ endif
 
 COMPILER_GNU = g++
 COMPILER_INTEL = icpc -qopt-streaming-stores=always
+COMPILER_HIP = hipcc
+COMPILER_CUDA = $(NVCC_WRAPPER)
 CXX = $(COMPILER_$(COMPILER))
 
 ifndef TARGET
@@ -23,25 +27,27 @@ define target_help
 Set TARGET to change to offload device. Defaulting to CPU.
 Available targets are:
   CPU (default)
-  GPU
+  CUDA
+  HIP
 endef
 $(info $(target_help))
 TARGET=CPU
 endif
 
-ifeq ($(TARGET), GPU)
-CXX = $(NVCC_WRAPPER)
+ifeq ($(TARGET), CUDA)
+CXX = $(COMPILER_CUDA)
+else ifeq ($(TARGET), HIP)
+CXX = $(COMPILER_HIP)
 endif
 
 OBJ = main.o KokkosStream.o
 
 kokkos-stream: $(OBJ) $(KOKKOS_CPP_DEPENDS)
-	$(CXX) $(KOKKOS_LDFLAGS) -DKOKKOS -O3 $(EXTRA_FLAGS) $(OBJ) $(KOKKOS_LIBS) -o $@
+	$(CXX) -L$(KOKKOS_PATH)/lib -L$(KOKKOS_PATH)/lib64 -ldl -Wl,--enable-new-dtags -DKOKKOS -O3 -std=c++14 $(EXTRA_FLAGS) $(OBJ) -lkokkoscore -lkokkoscontainers -o $@
 
 %.o: %.cpp
-	$(CXX) $(KOKKOS_CPPFLAGS) $(KOKKOS_CXXFLAGS) -DKOKKOS -O3 $(EXTRA_FLAGS) -c $<
+	$(CXX) -I$(KOKKOS_PATH)/include -DKOKKOS -O3 -std=c++14 $(EXTRA_FLAGS) -c $<
 
 .PHONY: clean
 clean:
 	rm -f kokkos-stream main.o KokkosStream.o
-
